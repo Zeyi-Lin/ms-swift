@@ -22,6 +22,7 @@ from .utils import AdapterRequest, InferStreamer, patch_npu_vllm, patch_vllm
 
 try:
     # After setting the environment variables, import vllm. This way of writing allows lint to pass.
+    os.environ['VLLM_USE_V1'] = os.environ.get('VLLM_USE_V1', '0')
     os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
     os.environ['VLLM_ENGINE_ITERATION_TIMEOUT_S'] = '3600'
     import vllm
@@ -95,8 +96,9 @@ class VllmEngine(InferEngine):
             enable_sleep_mode=enable_sleep_mode,
             engine_kwargs=engine_kwargs,
         )
-        context, npu_context = patch_vllm(num_infer_workers * get_node_setting()[1],
-                                          self.engine_args.device), nullcontext()
+        nnodes = get_node_setting()[1]
+        total_infer_workers = num_infer_workers * nnodes
+        context, npu_context = patch_vllm(world_size=total_infer_workers), nullcontext()
         if tensor_parallel_size == 1 or pipeline_parallel_size == 1:
             npu_context = patch_npu_vllm(self.engine_args.device)
         with context, npu_context:
@@ -304,6 +306,10 @@ class VllmEngine(InferEngine):
     def inner_model(self):
         return self.engine.model_executor.driver_worker.worker.model_runner.model
 
+    @property
+    def inner_model_executor(self):
+        return self.engine.model_executor
+
     async def _infer_stream_async(self, template: Template, inputs: Dict[str, Any], generation_config: SamplingParams,
                                   **kwargs) -> AsyncIterator[ChatCompletionStreamResponse]:
         request_id = random_uuid()
@@ -375,7 +381,13 @@ class VllmEngine(InferEngine):
         return self._create_chat_completion_response(result, template, generation_config, request_id)
 
     def _batch_infer_stream(self, *args, **kwargs):
-        self.engine.engine.model_executor.parallel_worker_tasks = None
+        if hasattr(self.engine, 'engine'):
+            self.engine.engine.model_executor.parallel_worker_tasks = None
+        elif hasattr(self.engine, 'engine_core'):
+            # vllm>=0.8
+            self.engine.engine_core.outputs_queue = None
+            self.engine.engine_core.queue_task = None
+            self.engine.output_handler = None
         return super()._batch_infer_stream(*args, **kwargs)
 
     def infer(

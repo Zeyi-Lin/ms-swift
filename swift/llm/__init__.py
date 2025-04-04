@@ -30,8 +30,8 @@ if TYPE_CHECKING:
                         messages_to_history, Processor, save_checkpoint, ProcessorMixin,
                         get_temporary_cache_files_directory, get_cache_dir)
     from .base import SwiftPipeline
+    from .data_loader import DataLoaderDispatcher, DataLoaderShard, BatchSamplerShard
 else:
-    _extra_objects = {k: v for k, v in globals().items() if not k.startswith('_')}
     _import_structure = {
         'rlhf': ['rlhf_main'],
         'infer': [
@@ -71,6 +71,7 @@ else:
             'get_temporary_cache_files_directory', 'get_cache_dir'
         ],
         'base': ['SwiftPipeline'],
+        'data_loader': ['DataLoaderDispatcher', 'DataLoaderShard', 'BatchSamplerShard'],
     }
 
     import sys
@@ -80,5 +81,5 @@ else:
         globals()['__file__'],
         _import_structure,
         module_spec=__spec__,
-        extra_objects=_extra_objects,
+        extra_objects={},
     )

@@ -237,19 +237,22 @@ def safe_snapshot_download(model_id_or_path: str,
             logger.info(f'Loading the model using local model_dir: {model_dir}')
             return model_dir
     if ignore_patterns is None:
-        ignore_patterns = []
-    ignore_patterns += [
-        '*.zip', '*.gguf', '*.pth', '*.pt', 'consolidated*', 'onnx/*', '*.safetensors.md', '*.msgpack', '*.onnx',
-        '*.ot', '*.h5'
-    ]
+        ignore_patterns = [
+            '*.zip', '*.gguf', '*.pth', '*.pt', 'consolidated*', 'onnx/*', '*.safetensors.md', '*.msgpack', '*.onnx',
+            '*.ot', '*.h5'
+        ]
     if not download_model:
         ignore_patterns += ['*.bin', '*.safetensors']
     hub = get_hub(use_hf)
     if model_id_or_path.startswith('~'):
         model_id_or_path = os.path.abspath(os.path.expanduser(model_id_or_path))
     with safe_ddp_context(hash_id=model_id_or_path):
+        model_path_to_check = '/'.join(model_id_or_path.split(':', 1))
         if os.path.exists(model_id_or_path):
             model_dir = model_id_or_path
+            sub_folder = None
+        elif os.path.exists(model_path_to_check):
+            model_dir = model_path_to_check
             sub_folder = None
         else:
             if model_id_or_path.startswith('/'):  # startswith
@@ -320,8 +323,12 @@ def use_submodel_func(model, submodel_name: str, func_list: Optional[List[str]] 
                 device = find_device(args)
                 if device is None:
                     device = find_device(kwargs)
-                res.logits = to_device(res.logits, device)
-                res.loss = to_device(res.loss, device)
+                if hasattr(res, 'logits'):
+                    res.logits = to_device(res.logits, device)
+                if hasattr(res, 'loss'):
+                    res.loss = to_device(res.loss, device)
+                if isinstance(res, dict) and 'last_hidden_state' in res:
+                    res['last_hidden_state'] = to_device(res['last_hidden_state'], device)
             return res
 
         return _new_func
