@@ -21,8 +21,8 @@ from transformers.utils.versions import require_version
 from swift.utils import get_dist_setting, get_logger, is_mp, is_unsloth_available, patch_getattr, use_torchacc
 from .constant import ModelType
 from .patcher import (patch_automodel, patch_automodel_for_sequence_classification, patch_get_dynamic_module,
-                      patch_mp_ddp)
-from .utils import AttnImpl, HfConfigFactory, ModelInfo, safe_snapshot_download
+                      patch_mp_ddp, patch_tp_plan)
+from .utils import AttnImpl, HfConfigFactory, InitModelStrategy, ModelInfo, safe_snapshot_download
 
 GetModelTokenizerFunction = Callable[..., Tuple[Optional[PreTrainedModel], PreTrainedTokenizerBase]]
 logger = get_logger()
@@ -72,7 +72,7 @@ class ModelMeta:
     task_type: Optional[str] = None
 
     # File patterns to ignore when downloading the model.
-    ignore_patterns: List[str] = field(default_factory=list)
+    ignore_patterns: Optional[List[str]] = None
     # Usually specifies the version limits of transformers.
     requires: List[str] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
@@ -142,7 +142,9 @@ def load_by_unsloth(args):
         model_name=args.adapters and args.adapters[0] or args.model_dir,
         dtype=args.torch_dtype,
         max_seq_length=args.max_length,
+        full_finetuning=args.quant_bits is None,
         load_in_4bit=args.quant_bits == 4,
+        load_in_8bit=args.quant_bits == 8,
     )
     if isinstance(model, PeftModel):
         base_model = model.model
@@ -228,6 +230,11 @@ def get_model_tokenizer_from_local(model_dir: str,
         if model is None:
             if model_info.task_type == 'seq_cls' and not model_meta.is_reward:
                 context = partial(patch_automodel_for_sequence_classification, model_meta=model_meta)
+            elif model_info.task_type == 'seq_cls' and model_meta.is_reward and model_config.num_labels > 1:
+                logger.warning('You are using a reward model for seq_cls task and num_labels > 1, '
+                               'ignore_mismatched_sizes will be set to True')
+                model_kwargs['ignore_mismatched_sizes'] = True
+                context = partial(patch_automodel_for_sequence_classification, model_meta=model_meta)
             else:
                 context = partial(patch_automodel, automodel_class=automodel_class, model_info=model_info)
             with context():
@@ -243,6 +250,10 @@ def get_model_tokenizer_from_local(model_dir: str,
         if model_info.task_type == 'embedding' and automodel_class.__name__ != 'AutoModel':
             from swift.llm.model.patcher import patch_output_normalizer
             patch_output_normalizer(model, model_meta=model_meta)
+
+        init_strategy = kwargs.get('init_strategy')
+        if init_strategy is not None:
+            InitModelStrategy.init_parameters(model, init_strategy)
 
     model_info.config = model_config if model is None else model.config
     if model:
@@ -403,18 +414,21 @@ def _read_args_json_model_type(model_dir):
 
 
 def _get_model_info(model_dir: str, model_type: Optional[str], quantization_config) -> ModelInfo:
-    config_dict = PretrainedConfig.get_config_dict(model_dir)[0]
+    try:
+        config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
+    except Exception:
+        config = PretrainedConfig.get_config_dict(model_dir)[0]
     if quantization_config is not None:
-        config_dict['quantization_config'] = quantization_config
-    quant_info = HfConfigFactory.get_quant_info(config_dict) or {}
-    torch_dtype = HfConfigFactory.get_torch_dtype(config_dict, quant_info)
-    max_model_len = HfConfigFactory.get_max_model_len(config_dict)
-    rope_scaling = HfConfigFactory.get_config_attr(config_dict, 'rope_scaling')
+        HfConfigFactory.set_config_attr(config, 'quantization_config', quantization_config)
+    quant_info = HfConfigFactory.get_quant_info(config) or {}
+    torch_dtype = HfConfigFactory.get_torch_dtype(config, quant_info)
+    max_model_len = HfConfigFactory.get_max_model_len(config)
+    rope_scaling = HfConfigFactory.get_config_attr(config, 'rope_scaling')
 
     if model_type is None:
         model_type = _read_args_json_model_type(model_dir)
     if model_type is None:
-        architectures = HfConfigFactory.get_config_attr(config_dict, 'architectures')
+        architectures = HfConfigFactory.get_config_attr(config, 'architectures')
         model_types = get_matched_model_types(architectures)
         if len(model_types) > 1:
             raise ValueError('Please explicitly pass the model_type. For reference, '
@@ -557,7 +571,7 @@ def get_model_tokenizer(
     kwargs['attn_impl'] = attn_impl
     kwargs['rope_scaling'] = rope_scaling
     kwargs['model_meta'] = model_meta
-    with patch_get_dynamic_module():
+    with patch_get_dynamic_module(), patch_tp_plan():
         model, processor = get_function(model_dir, model_info, model_kwargs, load_model, **kwargs)
 
     if not isinstance(processor, PreTrainedTokenizerBase) and hasattr(processor, 'tokenizer'):

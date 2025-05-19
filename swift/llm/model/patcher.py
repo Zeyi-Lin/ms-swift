@@ -1,4 +1,5 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
+import os
 from contextlib import contextmanager
 from functools import wraps
 from types import MethodType
@@ -7,9 +8,9 @@ from typing import Dict, List, Optional, Union
 import accelerate
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import transformers
 from accelerate.utils import find_device
+from packaging import version
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import PreTrainedModel, dynamic_module_utils, trainer
@@ -249,10 +250,6 @@ def patch_automodel_for_sequence_classification(model_meta):
 
     @classmethod
     def _new_from_pretrained(cls, *args, **kwargs):
-        cls_name = cls.__name__
-        cls_name = cls_name.split('For', 1)[0]
-        cls_name += 'ForSequenceClassification'
-        cls = type(cls_name, (cls, ), {})  # new_cls
         __init__ = cls.__init__
 
         def __new_init__(self, *args, **kwargs):
@@ -260,6 +257,8 @@ def patch_automodel_for_sequence_classification(model_meta):
             _patch_sequence_classification(self, model_meta)
 
         cls.__init__ = __new_init__
+        if hasattr(cls, '_tp_plan'):  # fix tp_plan
+            cls._tp_plan = cls._tp_plan or {}
         res = from_pretrained(cls, *args, **kwargs)
         cls.__init__ = __init__
         return res
@@ -282,7 +281,10 @@ def patch_automodel(automodel_class, model_info):
             kwargs.pop('use_cache', None)
         if model_info.quant_method == 'gptq':
             cls.main_input_name = 'input_ids'
-        return from_pretrained(cls, *args, **kwargs)
+        if hasattr(cls, '_tp_plan'):  # fix tp_plan
+            cls._tp_plan = cls._tp_plan or {}
+        model = from_pretrained(cls, *args, **kwargs)
+        return model
 
     PreTrainedModel.from_pretrained = _new_from_pretrained
 
@@ -347,3 +349,15 @@ def patch_get_dynamic_module():
         yield
     finally:
         dynamic_module_utils.get_cached_module_file = origin_get_cached_module_file
+
+
+@contextmanager
+def patch_tp_plan():
+    if not is_mp_ddp() or version.parse(transformers.__version__) < version.parse('4.50'):
+        yield
+        return
+    WORLD_SIZE = os.environ.get('WORLD_SIZE')
+    os.environ['_PATCH_WORLD_SIZE'] = WORLD_SIZE
+    os.environ.pop('WORLD_SIZE')
+    yield
+    os.environ['WORLD_SIZE'] = WORLD_SIZE

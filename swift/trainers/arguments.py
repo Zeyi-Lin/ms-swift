@@ -11,7 +11,7 @@ import torch.utils.checkpoint
 from transformers.training_args import TrainingArguments as HfTrainingArguments
 from transformers.training_args_seq2seq import Seq2SeqTrainingArguments as HfSeq2SeqTrainingArguments
 
-from swift.utils import get_dist_setting, get_logger, use_torchacc
+from swift.utils import get_dist_setting, get_logger, is_liger_available, is_mp, use_torchacc
 from .optimizers.galore import GaLoreConfig
 
 logger = get_logger()
@@ -39,11 +39,13 @@ class TrainArgumentsMixin:
     report_to: List[str] = field(default_factory=lambda: ['tensorboard'])
     dataloader_num_workers: Optional[int] = None
     dataloader_prefetch_factor: Optional[int] = None
+    use_liger_kernel: bool = False
 
     # extra
     check_model: bool = True
     acc_strategy: Literal['token', 'seq'] = 'token'
     train_dataloader_shuffle: bool = True
+    max_epochs: Optional[int] = None
 
     # torchacc
     metric_warmup_step: Optional[float] = 0
@@ -80,7 +82,15 @@ class TrainArgumentsMixin:
         except (ImportError, AttributeError):
             pass
 
+    def _init_liger(self):
+        if self.use_liger_kernel:
+            assert is_liger_available(), 'use_liger_kernel requires liger_kernels, try `pip install liger-kernel`'
+
     def __post_init__(self):
+        if is_mp() and self.use_liger_kernel:
+            raise ValueError('liger_kernel does not support device_map. '
+                             'Please use DDP/DeepSpeed for multi-GPU training.')
+
         from swift.llm.argument.base_args.model_args import ModelArguments
         if use_torchacc():
             self.dataloader_drop_last = True
@@ -93,6 +103,7 @@ class TrainArgumentsMixin:
         if self.gradient_checkpointing_kwargs:
             self.gradient_checkpointing_kwargs = ModelArguments.parse_to_dict(self.gradient_checkpointing_kwargs)
         self._fix_gradient_checkpointing()
+        self._init_liger()
         if self.dataloader_num_workers is None:
             if platform.system() == 'Windows':
                 self.dataloader_num_workers = 0
@@ -137,12 +148,24 @@ class GRPOArgumentsMixin:
     top_k: int = 50
     top_p: float = 0.9
     repetition_penalty: float = 1.
-    # vllm_device, vllm_gpu_memory_utilization, and vllm_max_model_len are defined in HfGRPOConfig.
-    num_infer_workers: int = 1
-    vllm_max_num_seqs: int = 256
+    num_infer_workers: Optional[int] = None  # deprecated
+    # vllm
+    vllm_mode: Literal['server', 'colocate'] = 'colocate'
+    # internal vllm (colocate)
+    vllm_device: Optional[List[str]] = None  # deprecated
+    vllm_gpu_memory_utilization: float = 0.9
+    vllm_max_model_len: Optional[int] = None
+    vllm_max_num_seqs: Optional[int] = None  # deprecated
     vllm_enforce_eager: bool = False
     vllm_limit_mm_per_prompt: Optional[Union[dict, str]] = None  # '{"image": 5, "video": 2}'
     vllm_enable_prefix_caching: bool = True
+    vllm_tensor_parallel_size: int = 1
+    # external vllm (server)
+    vllm_server_host: Optional[str] = None
+    vllm_server_port: int = 8000
+    vllm_server_timeout: float = 240.0
+    vllm_client = None  # Not required to set, used for client instantiation
+
     # reward function args, see details in swift/plugin/orm.py
     # cosine reward, https://arxiv.org/abs/2502.03373
     cosine_min_len_value_wrong: float = -0.5  # r^w_0 in paper, Reward for wrong answers with zero completion length.
@@ -154,23 +177,40 @@ class GRPOArgumentsMixin:
     repetition_n_grams: int = 3
     repetition_max_penalty: float = -1.0
 
-    # LMDeploy in GRPO
-    use_lmdeploy: bool = False
-    lmdeploy_device: Optional[str] = 'auto'
-    lmdeploy_session_len: Optional[int] = None
-    lmdeploy_cache_max_entry_count: float = 0.8
+    reward_model: Optional[List[str]] = None
+    reward_model_plugin: Optional[List[str]] = None
+
+    # sync ref model
+    sync_ref_model: bool = False
+    ref_model_sync_steps: int = 512
+    ref_model_mixup_alpha: float = 0.6
 
     async_generate: bool = False
-    tensor_parallel_size: int = 1
+    tensor_parallel_size: Optional[int] = None  # deprecated
+
     sleep_level: int = 0
     move_model_batches: Optional[int] = None
     offload_optimizer: bool = False
     offload_model: bool = False
     gc_collect_after_offload: bool = False
     multi_turn_func: Optional[str] = None
+    completion_length_limit_scope: Literal['total', 'per_round'] = 'per_round'
 
-    # mini-batch
-    mini_batch_size: Optional[int] = None
+    # DAPO, https://arxiv.org/abs/2503.14476
+    dynamic_sample: bool = False
+    max_resample_times: int = 3
+    overlong_filter: bool = False
+    soft_max_length: Optional[int] = None
+    soft_cache_length: Optional[int] = None
+
+    # Dr. GRPO, https://arxiv.org/abs/2503.20783
+    scale_rewards: bool = True
+
+    # compatible with trl main branch(0.17.0.dev0)
+    wandb_log_unique_prompts: Optional[bool] = None
+
+    # dataset
+    dataset_shuffle: Optional[bool] = True
 
 
 @dataclass

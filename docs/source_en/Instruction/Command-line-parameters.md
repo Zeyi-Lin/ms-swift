@@ -13,7 +13,7 @@ Hints:
 - 🔥tuner_backend: Options are 'peft', 'unsloth'. Default is 'peft'.
 - 🔥train_type: Options are: 'lora', 'full', 'longlora', 'adalora', 'llamapro', 'adapter', 'vera', 'boft', 'fourierft', 'reft'. Default is 'lora'.
 - 🔥adapters: A list used to specify the id/path of the adapter. Default is `[]`.
-- external_plugins: A list of external plugin py files which will be registered into the plugin mappings，please check [here](https://github.com/modelscope/ms-swift/tree/main/examples/train/grpo/run_external_rm.sh).
+- external_plugins: A list of external plugin py files which will be registered into the plugin mappings，please check [here](https://github.com/modelscope/ms-swift/tree/main/examples/train/grpo/plugin/run_external_reward_func.sh).
 - seed: Default is 42.
 - model_kwargs: Additional parameters specific to the model that can be passed in. This list of parameters will log a message during training and inference for reference. For example, `--model_kwargs '{"fps_max_frames": 12}'`.
 - load_args: When specifying `--resume_from_checkpoint`, `--model`, or `--adapters`, it will read the `args.json` file saved in the checkpoint, assigning values to the default None `basic arguments` (excluding data and generation arguments) which can be overridden by manually passing them in. The default is True for inference and export, and False for training.
@@ -21,6 +21,8 @@ Hints:
 - use_hf: Controls whether ModelScope or HuggingFace is used for model and dataset downloads, and model pushing. Defaults to False, meaning ModelScope is used.
 - hub_token: Hub token. The hub token for ModelScope can be viewed [here](https://modelscope.cn/my/myaccesstoken).
 - custom_register_path: A list of paths to `.py` files for custom registration of models, dialogue templates, and datasets. Defaults to `[]`.
+- ddp_timeout: The default value is 18000000, with the unit being seconds.
+- ddp_backend: Options include "nccl", "gloo", "mpi", "ccl", "hccl", "cncl", and "mccl". Default is None, which allows for automatic selection.
 
 ### Model Arguments
 - 🔥model: Model ID or local path to the model. If it's a custom model, please use it with `model_type` and `template`. The specific details can be referred to in the [Custom Model](../Customization/Custom-model.md).
@@ -32,23 +34,29 @@ Hints:
   - Note: These three implementations may not all be supported, depending on the support of the corresponding model.
 - num_labels: This parameter is required for classification models (i.e., `--task_type seq_cls`). It represents the number of labels, with a default value of None.
 - problem_type: This parameter is required for classification models (i.e., `--task_type seq_cls`). The options are 'regression', 'single_label_classification', and 'multi_label_classification'. The default value is None, and it will be automatically set based on the number of labels and the dataset type.
-- rope_scaling: Type of rope, supports `linear` and `dynamic`, should be used in conjunction with `max_length`. Default is None.
+- rope_scaling: Type of rope, supports `linear` and `dynamic` and `yarn`, should be used in conjunction with `max_length`. Default is None.
 - device_map: Device map configuration used by the model, such as 'auto', 'cpu', JSON string, or the path of a JSON file. The default is None, automatically set based on the device and distributed training conditions.
 - max_memory: When device_map is set to 'auto' or 'sequential', the model weights will be allocated to devices based on max_memory, for example: `--max_memory '{0: "20GB", 1: "20GB"}'`. The default value is None.
 - local_repo_path: Some models depend on a GitHub repo when loading. To avoid network issues during `git clone`, a local repo can be used directly. This parameter needs to be passed with the path to the local repo, with the default being `None`.
+- init_strategy: When loading the model, initialize all uninitialized parameters. Options values are 'zero', 'uniform', 'normal', 'xavier_uniform', 'xavier_normal', 'kaiming_uniform', 'kaiming_normal', 'orthogonal'. Default is None.
 
 ### Data Arguments
 - 🔥dataset: A list of dataset IDs or paths. Default is `[]`. The input format for each dataset is: `dataset ID or dataset path:sub-dataset#sampling size`, where sub-dataset and sampling data are optional. Local datasets support jsonl, csv, json, folders, etc. Open-source datasets can be cloned locally via git and used offline by passing the folder. For custom dataset formats, refer to [Custom Dataset](../Customization/Custom-dataset.md). You can pass in `--dataset <dataset1> <dataset2>` to use multiple datasets.
   - Sub-dataset: This parameter is effective only when the dataset is an ID or folder. If a subset was specified during registration, and only one sub-dataset exists, the registered sub-dataset is selected by default; otherwise, it defaults to 'default'. You can use `/` to select multiple sub-datasets, e.g., `<dataset_id>:subset1/subset2`. You can also use 'all' to select all sub-datasets, e.g., `<dataset_id>:all`.
-  - Sampling Size: By default, the complete dataset is used. If the sampling size is less than the total number of data samples, samples are selected randomly without repetition. If the sampling size exceeds the total number of data samples, then `sampling size%total data samples` samples are randomly sampled additionally, and data samples are repetitively sampled `sampling size//total data samples` times.
+  - Sampling Size: By default, the complete dataset is used. If the sampling size is less than the total number of data samples, samples are selected randomly without repetition. If the sampling size exceeds the total number of data samples, then `sampling size%total data samples` samples are randomly sampled additionally, and data samples are repetitively sampled `sampling size//total data samples` times. Note: Streaming datasets only perform sequential sampling. If `--dataset_shuffle false` is set, non-streaming datasets will also perform sequential sampling.
 - 🔥val_dataset: A list of validation set IDs or paths. Default is `[]`.
 - 🔥split_dataset_ratio: Ratio for splitting the training set and validation set when val_dataset is not specified, default is 0.01. Set to 0 if no validation set split is needed.
 - data_seed: Random seed for the dataset, default is 42.
 - 🔥dataset_num_proc: Number of processes for dataset preprocessing, default is 1.
+- 🔥load_from_cache_file: Whether to load the dataset from the cache, default is True.
+- dataset_shuffle: Whether to shuffle the dataset. Defaults to True.
+  - Note: The shuffling in CPT/SFT consists of two parts: dataset shuffling, controlled by `dataset_shuffle`; and shuffling in the train_dataloader, controlled by `train_dataloader_shuffle`.
+- val_dataset_shuffle: Whether to perform shuffling on the val_dataset. Default is False.
 - 🔥streaming: Stream reading and processing of the dataset, default is False. It is typically set to True when handling large datasets.
+  - Note: You need to set `--max_steps` explicitly, as the streaming dataset does not have a defined length. You can achieve training equivalent to `--num_train_epochs` by setting `--save_strategy epoch` and specifying a sufficiently large `max_steps`. Alternatively, you can set `max_epochs` to ensure training exits after the corresponding number of epochs, at which point the model weights will be validated and saved.
 - interleave_prob: Defaults to None. When combining multiple datasets, the `concatenate_datasets` function is used by default. If this parameter is set, the `interleave_datasets` function will be used instead. This parameter is typically used when combining streaming datasets and is passed to the `interleave_datasets` function.
 - stopping_strategy: Can be either "first_exhausted" or "all_exhausted", with the default being "first_exhausted". This parameter is passed to the `interleave_datasets` function.
-- enable_cache: Use cache for dataset preprocessing, default is False.
+- shuffle_buffer_size: This parameter is used to specify the shuffle buffer size for streaming datasets. Defaults to 1000.
 - download_mode: Dataset download mode, including `reuse_dataset_if_exists` and `force_redownload`, default is reuse_dataset_if_exists.
 - columns: Used for column mapping of the dataset to ensure that the dataset conforms to the format that AutoPreprocessor can handle. For more details, see [here](../Customization/Custom-dataset.md). You can pass in a JSON string, for example: `'{"text1": "query", "text2": "response"}'`, with the default being None.
 - strict: If set to True, any row with an issue in the dataset will throw an error immediately, otherwise, erroneous data samples will be discarded. Default is False.
@@ -65,14 +73,19 @@ Hints:
 - 🔥max_length: The maximum length of tokens for a single sample. Defaults to None, set to the maximum length of tokens supported by the model (max_model_len).
   - Note: In the cases of PPO, GRPO, and inference, max_length represents max_prompt_length.
 - truncation_strategy: Strategy for handling single sample tokens that exceed `max_length`. Options are `delete`, `left`, and `right`, representing deletion, left-side truncation, and right-side truncation, respectively. The default is 'delete'.
+  - It is currently not recommended to set the `truncation_strategy` to `left` or `right` for training multimodal models, as this may result in image tokens being truncated and causing errors (to be optimized).
 - 🔥max_pixels: The maximum number of pixels (H*W) for input images to a multimodal model. Images exceeding this limit will be scaled. Default is None, meaning no maximum pixel limit.
-- tools_prompt: Converts the tool list during agent training to the system format. Please refer to [Agent Training](./Agent-support.md). Options are 'react_en', 'react_zh', 'glm4', 'toolbench', 'qwen', with 'react_en' as the default.
+- 🔥agent_template: Agent template, which determines how to convert the list of tools into a system, how to extract tool calls from the model's response, and specifies the template format for `{"role": "tool_call", "content": "xxx"}` and `{"role": "tool_response", "content": "xxx"}`. Optional values include "react_en", "hermes", "glm4", "qwen_en", "toolbench", etc. For more details, please check [here](https://github.com/modelscope/ms-swift/blob/main/swift/plugin/agent_template/__init__.py). The default value is None, meaning it will be selected based on the model type.
 - norm_bbox: Controls how to scale bounding boxes (bbox). Options are 'norm1000' and 'none'. 'norm1000' represents scaling bbox coordinates to one-thousandths, and 'none' means no scaling. Default is None, automatically selected based on the model.
 - response_prefix: The prefix character for the response, for example, setting the response_prefix to `'<think>\n'` for QwQ-32B. The default is None, and it is automatically set according to the model.
+  - Note: If you are training the deepseek-r1/qwq model with a dataset that does not include `<think>...</think>`, please pass `--response_prefix ''` additionally when inferring after training.
 - padding_side: Padding side when `batch_size>=2` during training. Options are 'left' and 'right', with 'right' as the default. (For inference with batch_size>=2, only left padding is applied.)
-- loss_scale: Setting for the loss weight of training tokens. Default is `'default'`, meaning all responses (including history) are calculated with a cross-entropy loss of 1. Options are 'default', 'last_round', 'all', and agent-specific loss scales: 'react', 'agentflan', 'alpha_umi', and 'qwen'. 'last_round' means calculating only the loss of the last round's response, and 'all' calculates the loss for all tokens. For agent parts, see [Pluginization](../Customization/Pluginization.md) and [Agent Training](./Agent-support.md).
-- sequence_parallel_size: The number of sequence parallelism, with a default value of 1. This parameter is only supported in `swift pt/sft`. Refer to [example](https://github.com/modelscope/ms-swift/tree/main/examples/train/sequence_parallel/train.sh).
-  - Note: This feature is implemented with the capabilities of [xtuner](https://github.com/InternLM/xtuner), and not all models support this parameter.
+- loss_scale: Weight setting for the loss of training tokens. Default is `'default'`, which means that all responses (including history) are used with a weight of 1 in cross-entropy loss, and the loss from the corresponding `tool_response` in the agent_template is ignored. Possible values include: 'default', 'last_round', 'all', 'ignore_empty_think', and agent-specific options: 'react', 'hermes', 'qwen', 'agentflan', 'alpha_umi'. For more details about the agent part, please refer to [Pluginization](../Customization/Pluginization.md) and [Agent Training](./Agent-support.md).
+  - 'last_round': Only calculate the loss for the last round of response.
+  - 'all': Calculate the loss for all tokens.
+  - 'ignore_empty_think': On top of 'default', ignore the loss calculation for empty `'<think>\n\n</think>\n\n'`. See [this issue](https://github.com/modelscope/ms-swift/issues/4030) for more details.
+  - `'react'`, `'hermes'`, `'qwen'`: On top of `'default'`, set the loss weight of the `tool_call` part to 2.
+- sequence_parallel_size: Sequence parallelism size, default is 1. Currently supported in pt/sft/dpo. The training script refers to [here](https://github.com/modelscope/ms-swift/tree/main/examples/train/long_text/sequence_parallel.sh).
 - use_chat_template: Use chat template or generation template, default is `True`. `swift pt` is automatically set to the generation template.
 - template_backend: Selection of the template backend. Options are 'swift' and 'jinja', with 'swift' as the default. If using jinja, it applies transformer's `apply_chat_template`.
   - Note: The jinja template backend supports only inference, not training.
@@ -126,12 +139,14 @@ This parameter list inherits from transformers `Seq2SeqTrainingArguments`, with 
 - lr_scheduler_type: Type of lr_scheduler, defaults to 'cosine'.
 - lr_scheduler_kwargs: Other parameters for the lr_scheduler, defaults to None.
 - 🔥gradient_checkpointing_kwargs: Parameters for `torch.utils.checkpoint`. For example, set as `--gradient_checkpointing_kwargs '{"use_reentrant": false}'`. Defaults to None.
-- report_to: Default value is `tensorboard`. You can also specify `--report_to tensorboard wandb swanlab` or `--report_to all`.
+- full_determinism: Ensures reproducible results during training. Note: This will negatively impact performance. Defaults to False.
+- 🔥report_to: Default value is `tensorboard`. You can also specify `--report_to tensorboard wandb swanlab` or `--report_to all`.
 - logging_first_step: Whether to log the first step, defaults to True.
 - logging_steps: Interval for logging, defaults to 5.
 - predict_with_generate: Whether to use generative method during validation, default is False.
 - metric_for_best_model: Default is None, which means that when predict_with_generate is set to False, it is set to 'loss'; otherwise, it is set to 'rouge-l' (during PPO training, the default value is not set; in GRPO training, it is set to 'reward').
 - greater_is_better: Defaults to None, which sets it to False when `metric_for_best_model` contains 'loss', otherwise sets to True.
+- max_epochs: Forces the training to exit after reaching `max_epochs`, and performs validation and saving of the model weights. This parameter is especially useful when using a streaming dataset. Default is None.
 
 Other important parameters:
 - 🔥num_train_epochs: Number of training epochs, default is 3.
@@ -146,15 +161,15 @@ Other important parameters:
 - save_only_model: Whether to save only the model weights without including optimizer state, random seed state, etc. Default is False.
 - 🔥resume_from_checkpoint: Parameter for resuming training from a checkpoint, pass the checkpoint path. Default is None.
   - Note: `resume_from_checkpoint` will load the model weights, optimizer weights, and random seed, and continue training from the last trained steps. You can specify `--resume_only_model` to load only the model weights.
-- 🔥ddp_backend: Options include "nccl", "gloo", "mpi", "ccl", "hccl", "cncl", and "mccl". Default is None, which allows for automatic selection.
 - 🔥ddp_find_unused_parameters: Default is None.
-- ddp_timeout: The default value is 1800, with the unit being seconds.
 - 🔥dataloader_num_workers: Defaults to None. If the platform is Windows, it is set to 0; otherwise, it is set to 1.
 - dataloader_pin_memory: Default is True.
 - dataloader_persistent_workers: Default is False.
 - dataloader_prefetch_factor: Defaults to None. If `dataloader_num_workers > 0`, it is set to 10.
-- train_dataloader_shuffle: Whether the training dataloader should shuffle data, defaulting to True. This parameter is invalid for IterableDataset. IterableDataset reads data in a sequential manner.
+- train_dataloader_shuffle: Specifies whether the dataloader for CPT/SFT training is shuffled, with the default set to True. This parameter is not applicable to IterableDataset, as IterableDataset reads in a sequential manner.
 - 🔥neftune_noise_alpha: Coefficient of noise added by neftune, default is 0. Usually can be set to 5, 10, 15.
+- 🔥use_liger_kernel: Whether to enable the [Liger](https://github.com/linkedin/Liger-Kernel) kernel to accelerate training and reduce GPU memory consumption. Defaults to False. Example shell script can be found [here](https://github.com/modelscope/ms-swift/blob/main/examples/train/liger).
+  - Note: liger_kernel does not support device_map. Please use DDP/DeepSpeed for multi-GPU training.
 - average_tokens_across_devices: Whether to average the number of tokens across devices. If set to True, `num_tokens_in_batch` will be synchronized using all_reduce for accurate loss calculation. Default is False.
 - max_grad_norm: Gradient clipping. Default is 1.
 - push_to_hub: Push checkpoint to hub. Default is False.
@@ -174,9 +189,11 @@ Other important parameters:
 #### Full Arguments
 
 - freeze_parameters: Prefix of the parameters to be frozen, default is `[]`.
+- freeze_parameters_regex: Regex for matching the parameters to be frozen，default is None.
 - freeze_parameters_ratio: Ratio of parameters to freeze from bottom to top, default is 0. It can be set to 1 to freeze all parameters, and trainable parameters can be set in conjunction with this.
 - trainable_parameters: Prefix of additional trainable parameters, default is `[]`.
-  - Note: `trainable_parameters` takes precedence over `freeze_parameters` and `freeze_parameters_ratio`. When full parameter training is specified, all modules are set to trainable, then some parameters are frozen according to `freeze_parameters` and `freeze_parameters_ratio`, and finally, some parameters are reopened for training according to `trainable_parameters`.
+- trainable_parameters_regex: Regex for matching additional trainable parameters, default is None.
+  - Note: `trainable_parameters`, `trainable_parameters_regex` takes precedence over `freeze_parameters`, `freeze_parameters_regex` and `freeze_parameters_ratio`. When full parameter training is specified, all modules are set to trainable, then some parameters are frozen according to `freeze_parameters`, `freeze_parameters_regex` and `freeze_parameters_ratio`, and finally, some parameters are reopened for training according to `trainable_parameters`,`trainable_parameters_regex`.
 
 #### LoRA
 
@@ -242,7 +259,7 @@ Vera uses the three parameters `target_modules`, `target_regex`, and `modules_to
 
 #### LISA
 
-Note: LISA only supports full parameters, i.e., `train_type full`.
+Note: LISA only supports full parameters, i.e., `--train_type full`.
 
 - 🔥lisa_activated_layers: Default value is `0`, representing LISA is not used. Setting to a non-zero value activates that many layers, it is recommended to set to 2 or 8.
 - lisa_step_interval: Default value is `20`, number of iter to switch to layers that can be backpropagated.
@@ -288,10 +305,6 @@ The following parameters are effective when `train_type` is set to `reft`.
 - reft_intervention_type: Type of ReFT, supports 'NoreftIntervention', 'LoreftIntervention', 'ConsreftIntervention', 'LobireftIntervention', 'DireftIntervention', 'NodireftIntervention', default is `LoreftIntervention`.
 - reft_args: Other supported parameters for ReFT Intervention, input in json-string format.
 
-#### Liger
-
-- use_liger: Use liger-kernel for training.
-
 ### LMDeploy Arguments
 
 Parameter meanings can be found in the [lmdeploy documentation](https://lmdeploy.readthedocs.io/en/latest/api/pipeline.html#turbomindengineconfig).
@@ -315,6 +328,7 @@ Parameter meanings can be found in the [vllm documentation](https://docs.vllm.ai
 - enforce_eager: Determines whether vllm uses PyTorch eager mode or constructs a CUDA graph, default is `False`. Setting it to True can save memory but may affect efficiency.
 - 🔥limit_mm_per_prompt: Controls the use of multiple media in vllm, default is `None`. For example, you can pass in `--limit_mm_per_prompt '{"image": 5, "video": 2}'`.
 - vllm_max_lora_rank: Default is `16`. This is the parameter supported by vllm for lora.
+- - vllm_quantization: vllm is able to quantize model with this argument，supported values can be found [here](https://docs.vllm.ai/en/latest/serving/engine_args.html).
 - enable_prefix_caching: Enable the automatic prefix caching of vllm to save processing time for querying repeated prefixes. The default is `False`.
 
 ### Merge Arguments
@@ -335,7 +349,7 @@ Training arguments include the [base arguments](#base-arguments), [Seq2SeqTraine
 - 🔥create_checkpoint_symlink: Creates additional checkpoint symlinks to facilitate writing automated training scripts. The symlink paths for `best_model` and `last_model` are `f'{output_dir}/best'` and `f'{output_dir}/last'` respectively.
 - loss_type: Type of loss. Defaults to None, which uses the model's built-in loss function.
 - 🔥packing: Whether to use sequence packing to improve computational efficiency. The default value is False.
-  - Note: When using packing, please combine it with --attn_impl flash_attn. For details, see [this PR](https://github.com/huggingface/transformers/pull/31629). Packing does not currently support multimodal models.
+  - Note: When using packing, please combine it with `--attn_impl flash_attn` and ensure "transformers>=4.44". For details, see [this PR](https://github.com/huggingface/transformers/pull/31629).
 - 🔥lazy_tokenize: Whether to use lazy tokenization. If set to False, all dataset samples are tokenized before training (for multimodal models, this includes reading images from disk). This parameter defaults to False for LLM training, and True for MLLM training, to save memory.
 - acc_strategy: Strategy for calculating accuracy during training and validation. Options are `seq`-level and `token`-level accuracy, with `token` as the default.
 - max_new_tokens: Generation parameter override. The maximum number of tokens to generate when `predict_with_generate=True`, defaulting to 64.
@@ -395,49 +409,72 @@ The meanings of the following parameters can be referenced [here](https://huggin
 
 
 #### GRPO Arguments
-- num_generations: The G value in the GRPO algorithm, default is 8.
+- per_device_train_batch_size: The training batch size per device. In GRPO, this refers to the batch size of completions during training.
+- per_device_eval_batch_size: The evaluation batch size per device. In GRPO, this refers to the batch size of completions during evaluation.
+- num_generations: The number of samples for each prompt, referred to as the G value in the paper, needs to be divisible by per_device_batch_size * - gradient_accumulation_steps * nproc_per_node, default is 8.
 - max_completion_length: The maximum generation length in the GRPO algorithm, default is 512.
 - ds3_gather_for_generation: This parameter applies to DeepSpeed ZeRO-3. If enabled, the policy model weights are gathered for generation, improving generation speed. However, disabling this option allows training models that exceed the VRAM capacity of a single GPU, albeit at the cost of slower generation. Disabling this option is not compatible with vLLM generation. The default is True.
 - reward_funcs: Reward functions in the GRPO algorithm; options include `accuracy`,`format`,`cosine` and `repetition`, as seen in `swift/plugin/orm.py`. You can also customize your own reward functions in the plugin. Default is `[]`.
-- reward_weights: Weights for each reward function. Must match the number of reward functions. If `None`, all rewards are weighted equally with weight `1.0`.
+- reward_weights: Weights for each reward function. The number should be equal to the sum of the number of reward functions and reward models. If `None`, all rewards are weighted equally with weight `1.0`.
   - Note: If `--reward_model` is included in GRPO training, it is added to the end of the reward functions.
+- reward_model_plugin: The logic for the reward model, which defaults to ORM logic. For more information, please refer to [Customized Reward Models](./GRPO.md#customized-reward-models).
+- dataset_shuffle: Whether to shuffle the dataset randomly. Default is True.
+- loss_type: The type of loss normalization. Options are ['grpo', 'bnpo', 'dr_grpo'], default is 'grpo'. For details, see this [pr](https://github.com/huggingface/trl/pull/3256#discussion_r2033213348)
 - log_completions: Whether to log the model-generated content during training, to be used in conjunction with `--report_to wandb`, default is False.
   - Note: If `--report_to wandb` is not set, a `completions.jsonl` will be created in the checkpoint to store the generated content.
 - use_vllm: Whether to use vLLM as the infer_backend for GRPO generation, default is False.
-- num_infer_workers: The number of inference workers per node. This setting is only effective when using vLLM or lmdeploy.
-- vllm_device: Configures the devices for deploying vLLM. You can set it to auto, which will allocate the last few GPUs based on the value of num_infer_workers. Alternatively, specify a number of devices equal to num_infer_workers. For example: --vllm_device cuda:1 cuda:2.
-- vllm_gpu_memory_utilization: vLLM passthrough parameter, default is 0.9.
-- vllm_max_model_len: vLLM passthrough parameter, default is None.
-- vllm_max_num_seqs: vLLM passthrough parameter, default is 256.
-- vllm_enforce_eager: vLLM passthrough parameter, default is False.
-- vllm_limit_mm_per_prompt: vLLM passthrough parameter, default is None.
-- vllm_enable_prefix_caching: vLLM passthrough parameter, default is True.
+- vllm_mode: Mode to use for vLLM integration when `use_vllm` is set to `True`. Must be one of `server` or `colocate`
+- vllm_mode server parameter
+  - vllm_server_host: The host address of the vLLM server. Default is None. This is used when connecting to an external vLLM server.
+  - vllm_server_port: The service port of the vLLM server. Default is 8000.
+  - vllm_server_timeout: The connection timeout for the vLLM server. Default is 120 seconds.
+  - async_generate: Use async rollout to improve train speed. Note that rollout will use the model updated in the previous round when enabled. Multi-turn scenarios are not supported. Default is `false`.
+- vllm_mode colocate parameter
+  - vllm_gpu_memory_utilization: vLLM passthrough parameter, default is 0.9.
+  - vllm_max_model_len: vLLM passthrough parameter, the total length limit of model, default is None.
+  - vllm_enforce_eager: vLLM passthrough parameter, default is False.
+  - vllm_limit_mm_per_prompt: vLLM passthrough parameter, default is None.
+  - vllm_tensor_parallel_size: the tensor parallel size of vLLM engine, default is 1.
+  - sleep_level: make vllm sleep when model is training. Options are 0 or 1, default is 0, no sleep
 - top_k: Default is 50.
 - top_p: Default is 0.9.
 - repetition_penalty: Repetition penalty term. Default is 1.
 - num_iterations: number of iterations per batch. Default is 1.
 - epsilon: epsilon value for clipping. Default is 0.2.
 - epsilon_high: Upper clip coefficient, default is None. When set, it forms a clipping range of [epsilon, epsilon_high] together with epsilon.
-- async_generate: Use async rollout to improve train speed，default `false`.
-- sleep_level: vllm specific，when both actor and rollout in the same GPU，you can make vllm sleep when model is training.
+- sync_ref_model: Whether to synchronize the reference model. Default is False。
+  - ref_model_mixup_alpha: The Parameter controls the mix between the current policy and the previous reference policy during updates. The reference policy is updated according to the equation: $π_{ref} = α * π_θ + (1 - α) * π_{ref_{prev}}$. Default is 0.6.
+  - ref_model_sync_steps：The parameter determines how frequently the current policy is synchronized with the reference policy. Default is 512.
 - move_model_batches: When moving model parameters to fast inference frameworks such as vLLM/LMDeploy, determines how many batches to divide the layers into. The default is `None`, which means the entire model is not split. Otherwise, the model is split into `move_model_batches + 1` (non-layer parameters) + `1` (multi-modal component parameters) batches.
 - offload_optimizer: Whether to offload optimizer parameters during inference with vLLM/LMDeploy. The default is `False`.
 - offload_model: Whether to offload the model itself during inference with vLLM/LMDeploy. The default is `False`.
 - gc_collect_after_offload: Whether to perform garbage collection (both Python GC and GPU GC) after offloading. The default is `False`.
-- multi_turn_func: The multi turn GRPO plugin name. Add your multi-turn implementation in plugin/multi_turn.py
-- mini_batch_size: Used to further split the batch size on each device (per_device_batch) into smaller sub-batches. To ensure the split is valid, per_device_train_batch_size needs be divisible by mini_batch_size
+- multi_turn_func: The multi turn GRPO plugin name. Add your multi-turn implementation in plugin/multi_turn.py.
+- completion_length_limit_scope: Specifies the scope of the `max_completion_length` limit in multi-turn conversations.
+When set to `total`, the total output length across all turns must not exceed `max_completion_length`.
+When set to `per_round`, each individual turn's output length is limited separately.
+Defaults to `per_round`. Currently only takes effect in colocate mode.
+- dynamic_sample: Exclude data within the group where the reward standard deviation is 0, and additionally sample new data. Default is False.
+- max_resample_times: Under the dynamic_sample setting, limit the number of resampling attempts to a maximum of 3. Default is 3 times.
+- overlong_filter: Skip overlong truncated samples, which will not be included in loss calculation. Default is False.
+The hyperparameters for the reward function can be found in the [Built-in Reward Functions section](#built-in-reward-functions).
 
 cosine reward function arguments
-- `cosine_min_len_value_wrong` (default: 0.0): Reward value corresponding to the minimum length when the answer is incorrect. Default is 0.0
-- `cosine_max_len_value_wrong` (default: -0.5): Reward value corresponding to the maximum length when the answer is incorrect. Default is -0.5
-- `cosine_min_len_value_correct` (default: 1.0): Reward value corresponding to the minimum length when the answer is correct. Default is 1.0
-- `cosine_max_len_value_correct` (default: 0.5): Reward value corresponding to the maximum length when the answer is correct. Default is 0.5
-- `cosine_max_len` (default value equal to the model's maximum generation capacity): Maximum length limit for generated text. Default value equal to max_completion_length
+- cosine_min_len_value_wrong (default: 0.0): Reward value corresponding to the minimum length when the answer is incorrect. Default is 0.0
+- cosine_max_len_value_wrong (default: -0.5): Reward value corresponding to the maximum length when the answer is incorrect. Default is -0.5
+- cosine_min_len_value_correct (default: 1.0): Reward value corresponding to the minimum length when the answer is correct. Default is 1.0
+- cosine_max_len_value_correct (default: 0.5): Reward value corresponding to the maximum length when the answer is correct. Default is 0.5
+- cosine_max_len (default value equal to the model's maximum generation capacity): Maximum length limit for generated text. Default value equal to max_completion_length
 
 repetition penalty function arguments
 
-- `repetition_n_grams` (default: 3): Size of the n-gram used to detect repetition.
-- `repetition_max_penalty` (default: -1.0): Maximum penalty value, which controls the intensity of the penalty.
+- repetition_n_grams (default: 3): Size of the n-gram used to detect repetition.
+- repetition_max_penalty (default: -1.0): Maximum penalty value, which controls the intensity of the penalty.
+
+Soft overlong reward parameters:
+
+- soft_max_length: L_max in the paper, the maximum generation length of the model, default is equal to max_completion_length.
+- soft_cache_length: L_cache in the paper, controls the length penalty interval, which is defined as [soft_max_length - soft_cache_length, soft_max_length].
 
 #### SWANLAB
 
@@ -454,7 +491,6 @@ Inference arguments include the [base arguments](#base-arguments), [merge argume
 
 - 🔥infer_backend: Inference acceleration backend, supporting three inference engines: 'pt', 'vllm', and 'lmdeploy'. The default is 'pt'.
 - 🔥max_batch_size: Effective when infer_backend is set to 'pt'; used for batch inference, with a default value of 1.
-- ddp_backend: Effective when infer_backend is set to 'pt'; used to specify the distributed backend for multi-GPU inference. The default is None, which means automatic selection. For an example of multi-GPU inference, you can refer [here](https://github.com/modelscope/ms-swift/tree/main/examples/infer/pt).
 - 🔥result_path: Path to store inference results (jsonl). The default is None, meaning results are saved in the checkpoint directory (with args.json file) or './result' directory. The final storage path will be printed in the command line.
 - metric: Evaluate the results of the inference, currently supporting 'acc' and 'rouge'. The default is None, meaning no evaluation is performed.
 - val_dataset_sample: Number of samples from the inference dataset, default is None.
@@ -472,6 +508,8 @@ Deployment Arguments inherit from the [inference arguments](#inference-arguments
   - Note: In `swift app` or `swift eval`, the default is False.
 - log_interval: Interval for printing tokens/s statistics, default is 20 seconds. If set to -1, it will not be printed.
 - max_logprobs: Maximum number of logprobs returned to the client, with a default value of 20.
+- use_async_engine: Whether to use the async engine under the vLLM backend. Default is True.
+
 
 ### Web-UI Arguments
 - server_name: Host for the web UI, default is '0.0.0.0'.
@@ -492,15 +530,17 @@ App parameters inherit from [deployment arguments](#deployment-arguments) and [W
 
 Evaluation Arguments inherit from the [deployment arguments](#deployment-arguments).
 
-- 🔥eval_backend: Evaluation backend, default is 'Native', but can also be specified as 'OpenCompass' or 'VLMEvalKit'
-- 🔥eval_dataset: Evaluation dataset, refer to [Evaluation documentation](./Evaluation.md).
-- eval_limit: Number of samples for each evaluation set, default is None.
-- eval_output_dir: Folder for storing evaluation results, default is 'eval_output'.
-- 🔥local_dataset: Some evaluation sets, such as `CMB`, cannot be directly used and require downloading additional data packages. Setting this parameter to `true` will automatically download the full data package, create a `data` folder in the current directory, and start the evaluation. The data package will only be downloaded once and will be cached for future use. This parameter defaults to `false`.
-  - Note: By default, the evaluation will use datasets from `~/.cache/opencompass`. Specifying this parameter will directly use the data folder in the current directory.
-- temperature: Overrides the generation arguments, with a default value of 0.
-- eval_num_proc: Maximum number of concurrent clients during evaluation, default is 16.
-- 🔥eval_url: The evaluation URL, for example, `http://localhost:8000/v1`. Examples can be found [here](https://github.com/modelscope/ms-swift/tree/main/examples/eval/eval_url). The default value is None, which means using local deployment for evaluation.
+- 🔥eval_backend: Evaluation backend, defaults to 'Native'. It can also be specified as 'OpenCompass' or 'VLMEvalKit'.
+- 🔥eval_dataset: Evaluation dataset, please refer to the [evaluation documentation](./Evaluation.md).
+- eval_limit: Number of samples per evaluation set, defaults to None.
+- eval_output_dir: Directory to store evaluation results, defaults to 'eval_output'.
+- temperature: Override generation parameters, defaults to 0.
+- eval_num_proc: Maximum client concurrency during evaluation, defaults to 16.
+- eval_url: Evaluation URL, e.g., `http://localhost:8000/v1`. Examples can be found [here](https://github.com/modelscope/ms-swift/tree/main/examples/eval/eval_url). Defaults to None for local deployment evaluation.
+- eval_generation_config: Model inference configuration during evaluation, should be passed as a JSON string, e.g., `'{"max_new_tokens": 512}'`; defaults to None.
+- extra_eval_args: Additional evaluation parameters, should be passed as a JSON string, defaults to empty. Only effective for Native evaluation. For more parameter descriptions, please refer to [here](https://evalscope.readthedocs.io/en/latest/get_started/parameters.html).
+- local_dataset: Some evaluation sets, such as `CMB`, require additional data packages to be downloaded for utilization. Setting this parameter to `true` will automatically download the full data package, create a `data` folder in the current directory, and start the evaluation. The data package will only be downloaded once, and future evaluations will use the cache. This parameter defaults to `false`.
+  - Note: By default, evaluation uses the dataset under `~/.cache/opencompass`. After specifying this parameter, it will directly use the data folder in the current directory.
 
 
 ### Export Arguments
@@ -519,7 +559,7 @@ Export Arguments include the [basic arguments](#base-arguments) and [merge argum
 - to_hf: Convert weights from Megatron format to HF format. Default is False.
 - mcore_model: Path to the mcore format model. Default is None.
 - thread_count: The number of model slices when `--to_mcore true` is set. Defaults to None, and is automatically configured based on the model size, ensuring that the largest slice is less than 10GB.
-- test_convert_precision: Test the precision error when converting weights between HF and Megatron formats. Default is False.
+- 🔥test_convert_precision: Test the precision error when converting weights between HF and Megatron formats. Default is False.
 - 🔥push_to_hub: Whether to push to the hub, with the default being False. Examples can be found [here](https://github.com/modelscope/ms-swift/blob/main/examples/export/push_to_hub.sh).
 - hub_model_id: Model ID for pushing, default is None.
 - hub_private_repo: Whether it is a private repo, default is False.
@@ -560,7 +600,7 @@ Export Arguments include the [basic arguments](#base-arguments) and [merge argum
 Specific model arguments can be set using `--model_kwargs` or environment variables, for example: `--model_kwargs '{"fps_max_frames": 12}'` or `FPS_MAX_FRAMES=12`.
 
 ### qwen2_vl, qvq, qwen2_5_vl
-The parameter meanings are the same as in the `qwen_vl_utils` or `qwen_omni_utils` library. You can refer to [here](https://github.com/QwenLM/Qwen2-VL/blob/main/qwen-vl-utils/src/qwen_vl_utils/vision_process.py#L24)
+The parameter meanings are the same as in the `qwen_vl_utils` or `qwen_omni_utils` library. You can refer to [here](https://github.com/QwenLM/Qwen2.5-VL/blob/main/qwen-vl-utils/src/qwen_vl_utils/vision_process.py#L24)
 
 - IMAGE_FACTOR: Default is 28
 - MIN_PIXELS: Default is `4 * 28 * 28`
@@ -580,13 +620,14 @@ The parameter meanings are the same as in the `qwen_vl_utils` or `qwen_omni_util
 ### qwen2_5_omni
 qwen2_5_omni not only includes the model-specific parameters of qwen2_5_vl and qwen2_audio, but also contains the following parameter:
 - USE_AUDIO_IN_VIDEO: Default is False.
+- 🔥ENABLE_AUDIO_OUTPUT: Default is True. If training with zero3, set it to False.
 
 ### internvl, internvl_phi3
 For the meaning of the arguments, please refer to [here](https://modelscope.cn/models/OpenGVLab/Mini-InternVL-Chat-2B-V1-5)
 - MAX_NUM: Default is 12
 - INPUT_SIZE: Default is 448
 
-### internvl2, internvl2_phi3, internvl2_5
+### internvl2, internvl2_phi3, internvl2_5, internvl3
 For the meaning of the arguments, please refer to [here](https://modelscope.cn/models/OpenGVLab/InternVL2_5-2B)
 - MAX_NUM: Default is 12
 - INPUT_SIZE: Default is 448
@@ -633,7 +674,10 @@ For the meaning of the arguments, please refer to [here](https://modelscope.cn/m
 - ASCEND_RT_VISIBLE_DEVICES: Controls which NPU (effective for ASCEND cards) are used. By default, all NPUs are used.
 - MODELSCOPE_CACHE: Controls the cache path.
 - NPROC_PER_NODE: Pass-through for the `--nproc_per_node` parameter in torchrun. The default is 1. If the `NPROC_PER_NODE` or `NNODES` environment variables are set, torchrun is used to start training or inference.
+- PYTORCH_CUDA_ALLOC_CONF: It is recommended to set it to `'expandable_segments:True'`, which reduces GPU memory fragmentation. For more details, please refer to the [PyTorch documentation](https://docs.pytorch.org/docs/stable/notes/cuda.html#cuda-memory-management).
 - MASTER_PORT: Pass-through for the `--master_port` parameter in torchrun. The default is 29500.
 - MASTER_ADDR: Pass-through for the `--master_addr` parameter in torchrun.
 - NNODES: Pass-through for the `--nnodes` parameter in torchrun.
 - NODE_RANK: Pass-through for the `--node_rank` parameter in torchrun.
+- LOG_LEVEL: The log level, default is 'INFO'. You can set it to 'WARNING', 'ERROR', etc.
+- SWIFT_DEBUG: During `engine.infer(...)`, if set to '1', the content of input_ids and generate_ids will be printed.
