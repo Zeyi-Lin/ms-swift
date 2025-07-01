@@ -36,18 +36,21 @@ class TemplateArguments:
     max_pixels: Optional[int] = None
     agent_template: Optional[str] = None
     norm_bbox: Literal['norm1000', 'none', None] = None
-    response_prefix: Optional[str] = None
+    use_chat_template: Optional[bool] = None
     # train
+    padding_free: bool = False
     padding_side: Literal['left', 'right'] = 'right'
     loss_scale: str = 'default'
     sequence_parallel_size: int = 1
     # infer/deploy
-    use_chat_template: bool = True
+    response_prefix: Optional[str] = None
     template_backend: Literal['swift', 'jinja'] = 'swift'
 
     def __post_init__(self):
         if self.template is None and hasattr(self, 'model_meta'):
             self.template = self.model_meta.template
+        if self.use_chat_template is None:
+            self.use_chat_template = True
         if self.system is not None:
             if self.system.endswith('.txt'):
                 assert os.path.isfile(self.system), f'self.system: {self.system}'
@@ -61,9 +64,13 @@ class TemplateArguments:
             self.truncation_strategy = 'delete'
 
     def get_template_kwargs(self):
+        from ..train_args import TrainArguments
         truncation_strategy = self.truncation_strategy
         if truncation_strategy == 'delete':
             truncation_strategy = 'raise'
+        remove_unused_columns = self.remove_unused_columns  # from DataArguments
+        if not isinstance(self, TrainArguments) or hasattr(self, 'rlhf_type') and self.rlhf_type == 'grpo':
+            remove_unused_columns = True
         return {
             'default_system': self.system,
             'max_length': self.max_length,
@@ -71,10 +78,14 @@ class TemplateArguments:
             'max_pixels': self.max_pixels,
             'agent_template': self.agent_template,
             'norm_bbox': self.norm_bbox,
-            'response_prefix': self.response_prefix,
-            'loss_scale': self.loss_scale,
+            'use_chat_template': self.use_chat_template,
+            'remove_unused_columns': remove_unused_columns,
+            # train
+            'padding_free': self.padding_free,
             'padding_side': self.padding_side,
+            'loss_scale': self.loss_scale,
             'sequence_parallel_size': self.sequence_parallel_size,
+            # infer/deploy
+            'response_prefix': self.response_prefix,
             'template_backend': self.template_backend,
-            'use_chat_template': self.use_chat_template
         }

@@ -16,11 +16,11 @@ class MegatronTrainArguments(MegatronArguments, BaseArguments):
     add_version: bool = True
     # dataset
     lazy_tokenize: bool = False
-    packing: bool = False
 
     def init_model_args(self, config):
         self.megatron_model_meta = get_megatron_model_meta(self.model_type)
         kwargs = self.megatron_model_meta.convert_hf_config(config)
+        logger.info(f'megatron_config: {kwargs}')
         for k, v in kwargs.items():
             if getattr(self, k) is None:
                 setattr(self, k, v)
@@ -39,10 +39,12 @@ class MegatronTrainArguments(MegatronArguments, BaseArguments):
             os.makedirs(self.save, exist_ok=True)
 
     def __post_init__(self):
+        self.train_type = 'full'  # only support full
         self.sequence_parallel_size = self.context_parallel_size
         self.load = to_abspath(self.load, check_path_exist=True)
         BaseArguments.__post_init__(self)
         self._init_save()
+        self._check_packing()
         self.seq_length = self.seq_length or self.max_length
         if self.streaming:
             self.dataloader_type = 'external'

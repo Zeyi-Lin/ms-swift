@@ -1,4 +1,5 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
+import os
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Dict, List, Literal, Optional, Tuple
@@ -47,12 +48,11 @@ register_template(QwenTemplateMeta(LLMTemplateType.qwq_preview, default_system=q
 
 class ThinkingTemplate(Template):
 
-    def _swift_encode(self, inputs: StdTemplateInputs):
-        if not self.is_training:
-            for message in inputs.messages:
-                if message['role'] == 'assistant' and isinstance(message['content'], str):
-                    message['content'] = message['content'].split('</think>')[-1].lstrip('\n')
-        return super()._swift_encode(inputs)
+    def _swift_prepare_messages(self, messages):
+        super()._swift_prepare_messages(messages)
+        for i, message in enumerate(messages):
+            if message['role'] == 'assistant' and isinstance(message['content'], str) and i != len(messages) - 1:
+                message['content'] = message['content'].split('</think>')[-1].strip()
 
 
 register_template(
@@ -61,6 +61,30 @@ register_template(
 
 # '<think>\n\n</think>\n\n'
 register_template(QwenTemplateMeta(LLMTemplateType.qwen3, default_system=None, template_cls=ThinkingTemplate))
+
+
+class Qwen3RerankerTemplate(Template):
+    instruction = 'Given a web search query, retrieve relevant passages that answer the query'
+
+    def _preprocess_inputs(self, inputs: StdTemplateInputs) -> None:
+        super()._preprocess_inputs(inputs)
+        query = inputs.messages[-2]['content']
+        doc = inputs.messages[-1]['content']
+        user_message = '<Instruct>: ' + self.instruction + '\n' + '<Query>: ' + query + '\n' + '<Document>: ' + doc
+        inputs.messages[-2]['content'] = user_message
+        inputs.messages.pop(-1)
+
+
+qwen3_reranker_system = (
+    'Judge whether the Document meets the requirements based on the Query and the Instruct provided. '
+    'Note that the answer can only be \"yes\" or \"no\".')
+
+register_template(
+    QwenTemplateMeta(
+        LLMTemplateType.qwen3_reranker,
+        default_system=qwen3_reranker_system,
+        response_prefix='<think>\n\n</think>\n\n',
+        template_cls=Qwen3RerankerTemplate))
 
 register_template(Qwen2_5MathTemplateMeta(LLMTemplateType.qwen2_5_math))
 
@@ -219,7 +243,13 @@ class Qwen2VLTemplate(Template):
             else:
                 return ['<|vision_start|><|image_pad|><|vision_end|>']
         else:
-            inputs.videos[index] = fetch_video({'video': inputs.videos[index]}).to(torch.uint8)
+            video = inputs.videos[index]
+            if os.path.isdir(video):
+                video = [os.path.join(video, fname) for fname in os.listdir(video)]
+            video = fetch_video({'video': video})
+            if isinstance(video, torch.Tensor):
+                video = video.to(torch.uint8)
+            inputs.videos[index] = video
             return ['<|vision_start|><|video_pad|><|vision_end|>']
 
     def replace_ref(self, ref: str, index: int, inputs: StdTemplateInputs) -> List[Context]:
@@ -243,8 +273,11 @@ class Qwen2VLTemplate(Template):
                         images=images, videos=None, return_tensors='pt', do_resize=False)
                     media_grid_thw = media_inputs['image_grid_thw']
                 else:
-                    media_inputs = processor.image_processor(
-                        images=None, videos=videos, return_tensors='pt', do_resize=False)
+                    if hasattr(processor, 'video_processor'):
+                        processor_func = processor.video_processor
+                    else:
+                        processor_func = processor.image_processor
+                    media_inputs = processor_func(images=None, videos=videos, return_tensors='pt', do_resize=False)
                     media_grid_thw = media_inputs['video_grid_thw']
                     media_token = self.video_token_id
                     if self.version == 'v2_5':
@@ -388,13 +421,21 @@ class Qwen2_5VLTemplate(Qwen2VLTemplate):
 
 register_template(QwenTemplateMeta(MLLMTemplateType.qwen2_5_vl, template_cls=Qwen2_5VLTemplate))
 
+register_template(
+    QwenTemplateMeta(
+        MLLMTemplateType.mimo_vl,
+        template_cls=Qwen2_5VLTemplate,
+        default_system='You are MiMo, an AI assistant developed by Xiaomi.'))
+
 
 class Qwen2_5OmniTemplate(Qwen2_5VLTemplate):
     version = 'omni'
     placeholder_tokens = ['<|IMAGE|>', '<|AUDIO|>', '<|VIDEO|>']
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def init_processor(self, processor) -> None:
+        if processor is None:
+            return
+        super().init_processor(processor)
         from transformers.models.qwen2_5_omni.processing_qwen2_5_omni import Qwen2_5OmniProcessorKwargs
         default = Qwen2_5OmniProcessorKwargs._defaults
         self.seconds_per_chunk = default['videos_kwargs']['seconds_per_chunk']
@@ -442,6 +483,7 @@ class Qwen2_5OmniTemplate(Qwen2_5VLTemplate):
             audio=inputs.audios or None,
             images=inputs.images or None,
             videos=inputs.videos or None,
+            do_resize=False,
             return_tensors='pt')
         media_inputs.pop('input_ids')
         media_inputs.pop('attention_mask')

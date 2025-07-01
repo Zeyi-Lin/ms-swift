@@ -317,3 +317,40 @@ register_model(
         model_arch=ModelArch.llama,
         architectures=['MiMoForCausalLM'],
         requires=['transformers>=4.37']))
+
+register_model(
+    ModelMeta(
+        LLMModelType.mimo_rl, [ModelGroup([
+            Model('XiaomiMiMo/MiMo-7B-RL-0530', 'XiaomiMiMo/MiMo-7B-RL-0530'),
+        ])],
+        TemplateType.mimo_rl,
+        get_model_tokenizer_with_flash_attn,
+        model_arch=ModelArch.llama,
+        architectures=['MiMoForCausalLM'],
+        requires=['transformers>=4.37']))
+
+register_model(
+    ModelMeta(
+        LLMModelType.dots1,
+        [
+            ModelGroup([
+                Model('rednote-hilab/dots.llm1.base', 'rednote-hilab/dots.llm1.base'),
+                Model('rednote-hilab/dots.llm1.inst', 'rednote-hilab/dots.llm1.inst'),
+            ])
+        ],
+        TemplateType.dots1,
+        get_model_tokenizer_with_flash_attn,
+        architectures=['Dots1ForCausalLM'],
+        requires=['transformers>=4.53.0.dev0'],
+    ))
+
+register_model(
+    ModelMeta(
+        LLMModelType.hunyuan,
+        [ModelGroup([
+            Model('Tencent-Hunyuan/Hunyuan-A13B-Instruct', 'tencent/Hunyuan-A13B-Instruct'),
+        ])],
+        TemplateType.hunyuan,
+        get_model_tokenizer_with_flash_attn,
+        architectures=['HunYuanMoEV1ForCausalLM'],
+    ))

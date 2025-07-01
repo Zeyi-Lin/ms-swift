@@ -171,35 +171,35 @@ class IndexedDatasetBuilder:
         self.idx_list = [0]
         self.shard_offset = [0]
         self._thread = None
-        self._queue = Queue()
+        self._queue = Queue(maxsize=1000)
 
     def _write_worker(self):
         while True:
-            item = self._queue.get()
-            if item is None:
+            items = self._queue.get()
+            if items is None:
                 break
-            self.bin_file.write(item)
-            offset = self.bin_file.tell()
+            bin_buffer = []
+            for item in items:
+                item_buffer = pickle.dumps(item)
+                bin_buffer.append(item_buffer)
+                self.idx_list.append(self.idx_list[-1] + len(item_buffer))
+                self.length_list.append(item['length'])
+            self.bin_file.write(b''.join(bin_buffer))
+            offset = self.idx_list[-1] - self.shard_offset[-1]
             if offset >= self.CHUNK_SIZE:
                 self.bin_file.close()
                 self.bin_path = os.path.join(self.cache_dir, IndexedDataset.BIN_FNAME.format(self.n_shard))
                 self.shard_offset.append(self.shard_offset[-1] + offset)
                 self.n_shard += 1
+                if os.path.exists(self.bin_path):
+                    os.remove(self.bin_path)
                 self.bin_file = open(self.bin_path, 'ab')
 
     def add_items(self, items: List[Any]) -> None:
         if self._thread is None:
             self._thread = threading.Thread(target=self._write_worker, daemon=True)
             self._thread.start()
-        bin_buffer = []
-        for item in items:
-            item_buffer = pickle.dumps(item)
-            bin_buffer.append(item_buffer)
-            self.idx_list.append(self.idx_list[-1] + len(item_buffer))
-            self.length_list.append(
-                max([len(item[k]) for k in item.keys() if k.endswith('input_ids') or k.endswith('labels')]))
-        if bin_buffer:
-            self._queue.put(b''.join(bin_buffer))
+        self._queue.put(items)
 
     def finalize(self):
         if self._thread is not None:
@@ -221,7 +221,11 @@ class BinReader:
     def __init__(self, bin_path: str):
         self.bin_path = bin_path
         self.file = open(bin_path, 'rb')
-        self.mm = mmap.mmap(self.file.fileno(), 0, access=mmap.ACCESS_READ)
+        try:
+            self.mm = mmap.mmap(self.file.fileno(), 0, access=mmap.ACCESS_READ)
+        except ValueError:
+            # For example, self.file is an empty file.
+            self.mm = None
 
     def read_buffer(self, offset: int, size: int) -> bytes:
         if offset < 0 or size < 0 or offset + size > len(self.mm):
@@ -229,7 +233,8 @@ class BinReader:
         return self.mm[offset:offset + size]
 
     def __del__(self):
-        self.mm.close()
+        if self.mm is not None:
+            self.mm.close()
         self.file.close()
 
 
@@ -239,7 +244,8 @@ class IndexedDataset(Dataset):
 
     @staticmethod
     def get_cache_dir(dataset_name: str):
-        cache_dir = os.path.join(get_cache_dir(), 'tmp', dataset_name)
+        cache_dir = os.getenv('PACKING_CACHE') or os.path.join(get_cache_dir(), 'tmp')
+        cache_dir = os.path.join(cache_dir, dataset_name)
         os.makedirs(cache_dir, exist_ok=True)
         assert dataset_name is not None, f'dataset_name: {dataset_name}'
         return cache_dir
@@ -274,17 +280,27 @@ class IndexedDataset(Dataset):
 
 class PackingDataset(BasePackingDataset, Dataset):
 
-    def __init__(self, template, dataset, num_proc: int = 1, *, packing_interval: int = 128, strict: bool = False):
+    def __init__(
+        self,
+        template,
+        dataset,
+        num_proc: int = 1,
+        *,
+        packing_interval: int = 128,
+        strict: bool = False,
+        load_from_cache_file: bool = True,
+        **kwargs,
+    ):
         from datasets.fingerprint import update_fingerprint
         num_proc = min(len(dataset), num_proc)
         super().__init__(template, dataset, num_proc, packing_interval=packing_interval, strict=strict)
+        self.load_from_cache_file = load_from_cache_file
         template = copy(template)
         template.model = None  # Avoid hashing the model.
         fingerprint = update_fingerprint(dataset._fingerprint, 'PackingDataset', {
             'template': template,
             'packing_interval': packing_interval,
             'strict': strict,
-            'version': 'v1',
         })
         self.dataset_name = f'packing-cache-{fingerprint}'
         with safe_ddp_context(None, True):
@@ -293,8 +309,9 @@ class PackingDataset(BasePackingDataset, Dataset):
     def create_packed_dataset(self):
         cache_dir = IndexedDataset.get_cache_dir(self.dataset_name)
         logger.info(f'packing cache_dir: {cache_dir}')
-        if not os.path.exists(os.path.join(cache_dir, IndexedDataset.IDX_FNAME)):
-            self._queue = mp.Queue()
+        if not os.path.exists(os.path.join(cache_dir,
+                                           IndexedDataset.IDX_FNAME)) or not self.load_from_cache_file and is_master():
+            self._queue = mp.Queue(maxsize=1000)
             self._terminated_workers = 0
             self.prog_bar = tqdm(
                 total=len(self.dataset), dynamic_ncols=True, desc=f'Packing (num_proc={self.num_proc})')
@@ -321,7 +338,7 @@ class PackingDataset(BasePackingDataset, Dataset):
                 continue
             self.prog_bar.update(1)
             if data:
-                res.append((data, len(data['input_ids'])))
+                res.append((data, data['length']))
         return res
 
     def packing_dataset(self):
@@ -354,14 +371,17 @@ class PackingDataset(BasePackingDataset, Dataset):
 
 class IterablePackingDataset(BasePackingDataset, IterableDataset):
 
-    def __init__(self,
-                 template,
-                 dataset,
-                 num_proc: int = 1,
-                 *,
-                 packing_interval: int = 128,
-                 strict: bool = False,
-                 cyclic: bool = False):
+    def __init__(
+        self,
+        template,
+        dataset,
+        num_proc: int = 1,
+        *,
+        packing_interval: int = 128,
+        strict: bool = False,
+        cyclic: bool = False,
+        **kwargs,
+    ):
         super().__init__(template, dataset, num_proc, packing_interval=packing_interval, strict=strict)
         self._in_queue = mp.Queue()
         self._out_queue = mp.Queue()
@@ -375,29 +395,23 @@ class IterablePackingDataset(BasePackingDataset, IterableDataset):
     def _processor(self):
         while True:
             i, data = self._in_queue.get()
-            if data is None:
-                encoded_data = None
-            else:
-                encoded_data = self._encode_data(data)
+            encoded_data = self._encode_data(data)
             self._out_queue.put((i, encoded_data))
 
-    def _put_data_in_queue(self, iterator):
+    def _put_data_in_queue(self, iterator) -> int:
         for i in range(self.packing_interval):
             try:
                 data = next(iterator)
             except StopIteration:
-                self._in_queue.put((i, None))
-                return True
+                return i
             self._in_queue.put((i, data))
-        return False
+        return i + 1
 
-    def _fetch_data_out_queue(self, last_res):
-        res = [None] * self.packing_interval
-        for _ in range(self.packing_interval):
+    def _fetch_data_out_queue(self, last_res, num_samples):
+        res = [None] * num_samples
+        for _ in range(num_samples):
             i, data = self._out_queue.get()
-            if data is None:
-                break
-            elif not data:
+            if not data:
                 continue
             res[i] = (data, len(data['input_ids']))
         res = [data for data in res if data]
@@ -422,8 +436,9 @@ class IterablePackingDataset(BasePackingDataset, IterableDataset):
             iterator = iter(self.dataset)
         data = []
         while True:
-            finished = self._put_data_in_queue(iterator)
-            data = self._fetch_data_out_queue(data)
+            num_samples = self._put_data_in_queue(iterator)
+            finished = num_samples != self.packing_interval
+            data = self._fetch_data_out_queue(data, num_samples)
             res, data = self.calculate_matched_group(self.template, data, is_finished=finished)
             yield from res
             if finished:
@@ -438,10 +453,3 @@ class EncodePreprocessor(RowPreprocessor):
 
     def preprocess(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return self.template.encode(row)
-
-
-class GetLengthPreprocessor(RowPreprocessor):
-
-    def preprocess(self, row):
-        length = max([len(row[k]) for k in row.keys() if k.endswith('input_ids')])
-        return {'length': length}
