@@ -3,6 +3,7 @@
 import math
 from typing import Any, Optional, Tuple
 
+import megatron.core
 import torch
 import torch.nn as nn
 from megatron.core import parallel_state
@@ -13,11 +14,13 @@ from megatron.core.extensions.transformer_engine import (TEColumnParallelGrouped
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.transformer.mlp import apply_swiglu_sharded_factory
 from megatron.core.transformer.module import MegatronModule
-from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint, sharded_state_dict_default
+from packaging import version
 from peft.tuners.lora import model
 from peft.tuners.lora.layer import LoraLayer
 from peft.tuners.tuners_utils import BaseTunerLayer, check_adapters_to_merge
 from peft.utils.other import transpose
+
+from ..utils import tuners_sharded_state_dict
 
 
 class LoraParallelLinear(MegatronModule, LoraLayer):
@@ -91,6 +94,9 @@ class LoraParallelLinear(MegatronModule, LoraLayer):
             'config': self.config,
             'is_expert': self.is_expert,
         }
+        megatron_core_013 = version.parse(megatron.core.__version__) >= version.parse('0.13.0rc0')
+        if megatron_core_013:
+            kwargs['tp_group'] = self.base_layer.tp_group
         if self.is_parallel_a:
             self.in_features = self.in_features * self.tp_size
             if self.is_grouped:
@@ -220,21 +226,21 @@ class LoraParallelLinear(MegatronModule, LoraLayer):
 
     def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any):
         previous_dtype = x.dtype
-        if self.disable_adapters:
-            if self.merged:
-                self.unmerge()
-            result, bias = self.base_layer(x, *args, **kwargs)
-        elif self.merged:
-            result, bias = self.base_layer(x, *args, **kwargs)
-        else:
-            if isinstance(self.base_layer, TELayerNormColumnParallelLinear):
-                self.base_layer.return_layernorm_output = True
-                result, bias = self.base_layer(x, *args, **kwargs)
-                result, x = result  # ln_out
-            elif isinstance(self.base_layer, (TELinear, TEGroupedLinear)):
+        if self.disable_adapters and self.merged:
+            self.unmerge()
+
+        if isinstance(self.base_layer, TELayerNormColumnParallelLinear):
+            if self.disable_adapters or self.merged:
+                self.base_layer.return_layernorm_output = False
                 result, bias = self.base_layer(x, *args, **kwargs)
             else:
-                raise ValueError(f'Unsupported base layer type: {type(self.base_layer)}')
+                self.base_layer.return_layernorm_output = True
+                (result, x), bias = self.base_layer(x, *args, **kwargs)
+        elif isinstance(self.base_layer, (TELinear, TEGroupedLinear)):
+            result, bias = self.base_layer(x, *args, **kwargs)
+        else:
+            raise ValueError(f'Unsupported base layer type: {type(self.base_layer)}')
+        if not self.disable_adapters and not self.merged:
             for active_adapter in self.active_adapters:
                 if active_adapter not in self.lora_A.keys():
                     continue
@@ -266,21 +272,7 @@ class LoraParallelLinear(MegatronModule, LoraLayer):
             sharded_offsets: Tuple[Tuple[int, int, int]] = (),
             metadata: Optional[dict] = None,
     ) -> ShardedStateDict:
-        sharded_state_dict = {}
-        # Save parameters
-        self._save_to_state_dict(sharded_state_dict, '', keep_vars=True)
-        sharded_state_dict = make_sharded_tensors_for_checkpoint(
-            sharded_state_dict, prefix, sharded_offsets=sharded_offsets)
-        # Recurse into submodules
-        for name, module in self.named_children():
-            if 'Dict' in module.__class__.__name__:
-                modules = module.named_children()
-            else:
-                modules = [(None, module)]
-            for n, m in modules:
-                _prefix = f'{prefix}{name}.' if n is None else f'{prefix}{name}.{n}.'
-                sharded_state_dict.update(sharded_state_dict_default(m, _prefix, sharded_offsets, metadata))
-
+        sharded_state_dict = tuners_sharded_state_dict(self, prefix, sharded_offsets, metadata)
         if prefix.endswith('linear_fc1.'):
             if isinstance(self.base_layer, TEGroupedLinear) and self.config.gated_linear_unit:
                 num_global_experts = (parallel_state.get_expert_model_parallel_world_size() * self.base_layer.num_gemms)

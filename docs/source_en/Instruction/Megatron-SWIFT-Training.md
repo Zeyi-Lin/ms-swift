@@ -10,9 +10,12 @@ To use Megatron-SWIFT, in addition to installing the `swift` dependencies, you a
 ```shell
 # Recommended PyTorch version: 2.5 / 2.6
 pip install pybind11
+
 # transformer_engine
 # If an installation error occurs, you can refer to this issue for resolution: https://github.com/modelscope/ms-swift/issues/3793
-pip install git+https://github.com/NVIDIA/TransformerEngine.git@release_v2.3
+pip install --no-build-isolation transformer_engine[pytorch]
+# If the above command fails, you can also install it using the following command:
+# pip install git+https://github.com/NVIDIA/TransformerEngine.git@release_v2.3
 
 # apex
 git clone https://github.com/NVIDIA/apex
@@ -22,7 +25,11 @@ git checkout e13873debc4699d39c6861074b9a3b2a02327f92
 pip install -v --disable-pip-version-check --no-cache-dir --no-build-isolation --config-settings "--build-option=--cpp_ext" --config-settings "--build-option=--cuda_ext" ./
 
 # megatron-core
-pip install git+https://github.com/NVIDIA/Megatron-LM.git@core_r0.12.0
+pip install git+https://github.com/NVIDIA/Megatron-LM.git@core_r0.13.0
+
+# If you are using multi-node training, please additionally set the `MODELSCOPE_CACHE` environment variable to a shared storage path.
+# This will ensure that the dataset cache is shared, thereby speeding up preprocessing.
+export MODELSCOPE_CACHE='/xxx/shared'
 ```
 
 Alternatively, you can also use the image:
@@ -32,7 +39,7 @@ modelscope-registry.cn-beijing.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu
 modelscope-registry.us-west-1.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.4.0-py310-torch2.6.0-vllm0.8.5.post1-modelscope1.27.1-swift3.5.3
 ```
 
-The training module in the dependent library Megatron-LM will be cloned and installed by swift via `git clone`. Alternatively, you can use the environment variable `MEGATRON_LM_PATH` to point to the path of an already downloaded repository (in offline environments, use the [core_r0.12.0 branch](https://github.com/NVIDIA/Megatron-LM/tree/core_r0.12.0)).
+The training module in the dependent library Megatron-LM will be cloned and installed by swift via `git clone`. Alternatively, you can use the environment variable `MEGATRON_LM_PATH` to point to the path of an already downloaded repository (in offline environments, use the [core_r0.13.0 branch](https://github.com/NVIDIA/Megatron-LM/tree/core_r0.13.0)).
 
 
 ## Quick Start Example
@@ -40,15 +47,15 @@ The training module in the dependent library Megatron-LM will be cloned and inst
 This section introduces a quick start example for fine-tuning the self-awareness of the Qwen2.5-7B-Instruct model using two 80GiB A100 GPUs. The following best practices can be completed within 10 minutes.
 
 First, we need to convert the weights from HF (Hugging Face) format to Megatron format:
-- If you encounter OOM, simply remove `CUDA_VISIBLE_DEVICES=0`.
-- For "ms-swift>=3.6", it is recommended to add the `--test_convert_precision true` parameter to test conversion precision.
+- If OOM (Out of Memory) occurs, simply remove `CUDA_VISIBLE_DEVICES=0`; the system will automatically use multiple GPUs. If you encounter insufficient memory, please remove `--test_convert_precision true`.
 ```shell
 CUDA_VISIBLE_DEVICES=0 \
 swift export \
     --model Qwen/Qwen2.5-7B-Instruct \
     --to_mcore true \
     --torch_dtype bfloat16 \
-    --output_dir Qwen2.5-7B-Instruct-mcore
+    --output_dir Qwen2.5-7B-Instruct-mcore \
+    --test_convert_precision true
 ```
 
 Next, use the following script to start training. The required GPU memory resources are 2*80GiB:
@@ -89,8 +96,7 @@ megatron sft \
 
 Finally, convert the Megatron format weights back to HF format:
 - Note: Please point `--mcore_model` to the parent directory of `iter_xxx`. By default, the corresponding checkpoint from `latest_checkpointed_iteration.txt` will be used.
-- If you encounter OOM, simply remove `CUDA_VISIBLE_DEVICES=0`.
-- For "ms-swift>=3.6", it is recommended to add the `--test_convert_precision true` parameter to test conversion precision.
+- If OOM (Out of Memory) occurs, simply remove `CUDA_VISIBLE_DEVICES=0`. If you encounter insufficient memory, please remove `--test_convert_precision true`.
 
 ```shell
 CUDA_VISIBLE_DEVICES=0 \
@@ -98,7 +104,8 @@ swift export \
     --mcore_model megatron_output/Qwen2.5-7B-Instruct/vx-xxx \
     --to_hf true \
     --torch_dtype bfloat16 \
-    --output_dir megatron_output/Qwen2.5-7B-Instruct/vx-xxx-hf
+    --output_dir megatron_output/Qwen2.5-7B-Instruct/vx-xxx-hf \
+    --test_convert_precision true
 ```
 
 We then perform inference on the generated HF format weights:
@@ -124,6 +131,8 @@ I am a language model developed by swift, you can call me swift-robot. How can I
 - The custom dataset format is the same as `ms-swift`. Refer to the [custom dataset documentation](../Customization/Custom-dataset.md).
 
 ## LoRA Training
+
+Best practice reference for single-node 8xH20 LoRA training with Qwen3-235B-A22B-Instruct-250718: https://github.com/modelscope/ms-swift/pull/5033.
 
 Compared to full parameter tuning, LoRA training differs in both the training and MCore-to-HF conversion scripts:
 
@@ -199,8 +208,8 @@ The speed comparison of full-parameter training for Dense/MoE models using `mega
 
 |                  | Megatron-LM | Deepspeed-ZeRO2 | Deepspeed-ZeRO3 |
 | ---------------- | ----------- | --------------- | --------------- |
-| Training Speed   | 2.93s/it    | 6.02s/it        | 24.30s/it       |
-| GPU Memory Usage | 8\*66GB      | 8\*72GB          | 8\*50GB          |
+| Training Speed   | 2.95s/it    | 6.02s/it        | 24.30s/it       |
+| GPU Memory Usage | 8\*57GB      | 8\*72GB          | 8\*50GB          |
 
 ## Command Line Arguments
 
@@ -213,7 +222,7 @@ The speed comparison of full-parameter training for Dense/MoE models using `mega
 - 🔥recompute_granularity: Granularity of activation recomputation, options are 'full', 'selective'. 'full' means recomputing the entire transformer layer, while 'selective' means only recomputing the core attention part of the transformer layer. 'selective' is generally recommended. Default is 'selective'.
 - 🔥recompute_method: This parameter takes effect only when recompute_granularity is set to 'full', options are 'uniform', 'block'. Default is None.
 - 🔥recompute_num_layers: This parameter takes effect only when recompute_granularity is set to 'full'. Default is None. If `recompute_method` is set to uniform, this parameter specifies the number of transformer layers in each uniformly divided recomputation unit. For example, you can specify `--recompute_granularity full --recompute_method uniform --recompute_num_layers 4`. The larger the recompute_num_layers, the smaller the memory usage but higher computation cost. Default is None.
-- recompute_modules: Options include "core_attn", "moe_act", "layernorm", "mla_up_proj", "mlp", and "moe". The default value is `["core_attn"]`. For example, during MoE training, you can reduce memory usage by specifying `--recompute_granularity selective --recompute_modules core_attn moe`. Among these, "core_attn", "mlp", and "moe" use normal checkpointing, while "moe_act", "layernorm", and "mla_up_proj" use output-discarding checkpointing.
+- recompute_modules: Options include "core_attn", "moe_act", "layernorm", "mla_up_proj", "mlp", and "moe". The default value is `["core_attn"]`. This parameter takes effect when `--recompute_granularity selective` is set. For example, during MoE training, you can reduce memory usage by specifying `--recompute_granularity selective --recompute_modules core_attn moe`. Among these, "core_attn", "mlp", and "moe" use normal checkpointing, while "moe_act", "layernorm", and "mla_up_proj" use output-discarding checkpointing.
   - "core_attn": Recomputes the core attention part of the Transformer layer.
   - "mlp": Recomputes the dense MLP layer.
   - "moe": Recomputes the MoE layer.
@@ -232,6 +241,7 @@ The speed comparison of full-parameter training for Dense/MoE models using `mega
 - 🔥cross_entropy_loss_fusion: Enables cross-entropy loss calculation fusion. Default is False.
 - cross_entropy_fusion_impl: Implementation of cross-entropy loss fusion. Options include 'native' and 'te'. Defaults to 'native'.
 - calculate_per_token_loss: Scales the cross-entropy loss according to the number of non-padded tokens in the global batch. Default is True.
+  - Note: The default is False in RLHF.
 - 🔥attention_backend: The attention backend to use (flash, fused, unfused, local, auto). Defaults to auto.
 - optimizer: Optimizer type, options are 'adam', 'sgd'. Default is adam.
 - 🔥optimizer_cpu_offload: Offloads the optimizer state to CPU. Default is `False`.
@@ -244,13 +254,11 @@ The speed comparison of full-parameter training for Dense/MoE models using `mega
 - dataloader_type: Default is 'cyclic', options are 'single', 'cyclic', 'external'. If `--streaming` is enabled, set it to external.
 - manual_gc: Disables the default garbage collector and manually triggers garbage collection. Default is False.
 - manual_gc_interval: Interval at which garbage collection is triggered. Default is 0.
-- no_check_for_nan_in_loss_and_grad: Default is False.
 - seed: Random seed for python, numpy, pytorch, and cuda, default is 42.
 - 🔥num_workers: Number of workers for the dataloader, default is 4.
   - Note: If `--streaming true` is set, it will be set to 1.
 seq_length: Defaults to None, meaning it is set to `max_length`. To restrict the dataset length, please use the `--max_length` parameter in the basic arguments; there is no need to set this parameter.
 - use_cpu_initialization: Initializes weights on the CPU, default is False. Used during HF and MCore weight conversion.
-- no_create_attention_mask_in_dataloader: Does not create an attention mask in the dataloader, default is True.
 - extra_megatron_kwargs: Additional parameters passed to Megatron, provided as a JSON object. Defaults to None.
 
 **Learning Rate Parameters**:
@@ -301,8 +309,8 @@ seq_length: Defaults to None, meaning it is set to `max_length`. To restrict the
 - 🔥sequence_parallel: Enable sequence parallel optimization. Default is False.
 - 🔥context_parallel_size: CP (Context Parallelism) size, default is 1.
 - tp_comm_overlap: Overlap tensor parallel communication with GEMM (General Matrix Multiplication) kernels (to reduce communication time). Default is False.
-- overlap_grad_reduce: Overlap grad reduction operations in DDP (to reduce DP communication time). Default is False.
-- overlap_param_gather: Overlap all-gather of parameters in the distributed optimizer (to reduce DP communication time). Default is False.
+- 🔥overlap_grad_reduce: Overlap grad reduction operations in DDP (to reduce DP communication time). Default is False.
+- 🔥overlap_param_gather: Overlap all-gather of parameters in the distributed optimizer (to reduce DP communication time). Default is False.
 - distributed_timeout_minutes: The timeout duration for torch.distributed (in minutes). This parameter is deprecated and is now controlled by the `ddp_timeout` in the [Base Arguments](./Command-line-parameters.md#base-arguments), with a default value of 300000 minutes.
 
 **Logging Parameters**:
@@ -417,9 +425,10 @@ Full-parameter Training:
 
 LoRA Training:
 
-- adapter_load: Path to the adapter weights to be loaded. Default is `None`.
+- adapter_load: The path to the adapter weights for loading, used for resuming LoRA training from a checkpoint. The default is None. The method for resuming LoRA training from a checkpoint is the same as for full-parameter training. Please pay attention to the meaning of the `--finetune` parameter.
 - 🔥target_modules: Suffixes of modules to apply LoRA to. Default is `['all-linear']`.
 - 🔥target_regex: Regex expression to specify LoRA modules. Default is `None`. If this value is provided, the `target_modules` parameter will be ignored.
+- 🔥modules_to_save: After attaching a tuner, explicitly specifies additional original model modules to participate in training and storage. The default is `[]`.
 - 🔥lora_rank: Default is `8`.
 - 🔥lora_alpha: Default is `32`.
 - lora_dropout: Default is `0.05`.
@@ -441,8 +450,12 @@ LoRA Training:
 Megatron training parameters inherit from Megatron parameters and basic parameters. For information on basic parameters, see [here](./Command-line-parameters.md#base-arguments). Additionally, the following parameters are included:
 
 - add_version: Adds a directory `<version>-<timestamp>` to `save` to prevent overwriting weights, default is True.
+- padding_free: Flattens the data in a batch to avoid padding, thereby reducing memory usage and accelerating training. Default is True.
+  - If you wish to customize the attention_mask, you can set `--padding_free false`.
+- mlp_padding_free: The default is False. This is used for applying padding-free optimization to the MLP when padding_free is set to false. It allows for improved training speed and reduced memory usage while customizing the attention_mask.
 - 🔥packing: Whether to use sequence packing, defaults to False. Currently supports `megatron pt/sft`.
-- 🔥packing_cache: Specifies the directory for packing cache. The default value is `None`, which means the cache will be stored in the path defined by the environment variable `$MODELSCOPE_CACHE`. When using the packing feature across multiple nodes, ensure that all nodes share the same packing cache directory. You can achieve this by setting the `MODELSCOPE_CACHE` environment variable or by adding the `--packing_cache <shared_path>` argument in the command line.
+- packing_cache: Specifies the directory for packing cache. The default value is `None`, which means the cache will be stored in the path defined by the environment variable `$MODELSCOPE_CACHE`. When using the packing feature across multiple nodes, ensure that all nodes share the same packing cache directory. You can achieve this by setting the `MODELSCOPE_CACHE` environment variable or by adding the `--packing_cache <shared_path>` argument in the command line.
+  - Note: This parameter will be removed in "ms-swift>=3.7". The `packing_cache` setting will no longer be required for multi-node packing.
 - 🔥streaming: Stream reading and processing of the dataset, default is False. It is typically set to True when handling large datasets. For more information on streaming parameters, refer to the command-line parameters documentation.
 - lazy_tokenize: Default is False. If this parameter is set to False, all dataset samples are tokenized before training (this avoids errors during training); if set to True, tokenization occurs during training (this saves memory).
 - max_epochs: Forces the training to exit after reaching `max_epochs`, and performs validation and saving of the model weights. This parameter is especially useful when using a streaming dataset. Default is None.
